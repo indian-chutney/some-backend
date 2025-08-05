@@ -172,83 +172,141 @@ app.get("/api/v1/tasks-info", async (req: express.Request, res: express.Response
     const lastMonthStart = lastMonth.toISOString().split('T')[0]!;
     const lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0).toISOString().split('T')[0]!;
     
-    // Query for today's tasks
-    const { data: todayData } = await supabase
-      .from("user_task_stats")
-      .select("tasks_done")
-      .eq("user_id", userId)
-      .eq("date", today)
-      .single();
-    
-    // Query for yesterday's tasks
-    const { data: yesterdayData } = await supabase
-      .from("user_task_stats")
-      .select("tasks_done")
-      .eq("user_id", userId)
-      .eq("date", yesterday)
-      .single();
-    
-    // Query for current week's tasks
-    const { data: weekData } = await supabase
-      .from("user_task_stats")
-      .select("tasks_done")
-      .eq("user_id", userId)
-      .gte("date", weekStart)
-      .lte("date", today);
-    
-    // Query for last week's tasks
-    const { data: lastWeekData } = await supabase
-      .from("user_task_stats")
-      .select("tasks_done")
-      .eq("user_id", userId)
-      .gte("date", lastWeekStart)
-      .lte("date", lastWeekEnd);
-    
-    // Query for current month's tasks
-    const { data: monthData } = await supabase
-      .from("user_task_stats")
-      .select("tasks_done")
-      .eq("user_id", userId)
-      .gte("date", monthStart)
-      .lte("date", today);
-    
-    // Query for last month's tasks
-    const { data: lastMonthData } = await supabase
-      .from("user_task_stats")
-      .select("tasks_done")
-      .eq("user_id", userId)
-      .gte("date", lastMonthStart)
-      .lte("date", lastMonthEnd);
-    
-    // Calculate totals
-    const todays_tasks = todayData?.tasks_done || 0;
-    const yesterdays_tasks = yesterdayData?.tasks_done || 0;
-    const weeks_tasks = weekData?.reduce((sum, item) => sum + item.tasks_done, 0) || 0;
-    const last_weeks_tasks = lastWeekData?.reduce((sum, item) => sum + item.tasks_done, 0) || 0;
-    const months_tasks = monthData?.reduce((sum, item) => sum + item.tasks_done, 0) || 0;
-    const last_months_tasks = lastMonthData?.reduce((sum, item) => sum + item.tasks_done, 0) || 0;
-    
-    // Calculate progress percentages (set to 0 if negative)
-    const progress = yesterdays_tasks > 0 
-      ? Math.max(0, ((todays_tasks - yesterdays_tasks) / yesterdays_tasks) * 100)
-      : 0;
-    
-    const weeks_progress = last_weeks_tasks > 0
-      ? Math.max(0, ((weeks_tasks - last_weeks_tasks) / last_weeks_tasks) * 100)
-      : 0;
-    
-    const months_progress = last_months_tasks > 0
-      ? Math.max(0, ((months_tasks - last_months_tasks) / last_months_tasks) * 100)
-      : 0;
-    
-    res.json({
-      todays_tasks,
-      progress,
-      weeks_tasks,
-      weeks_progress,
-      months_tasks,
-      months_progress
+    // Try to use SQL RPC function for tasks info aggregation
+    const { data: tasksInfo, error } = await supabase.rpc('get_user_tasks_info', {
+      target_user_id: userId,
+      today_date: today,
+      yesterday_date: yesterday,
+      week_start: weekStart,
+      last_week_start: lastWeekStart,
+      last_week_end: lastWeekEnd,
+      month_start: monthStart,
+      last_month_start: lastMonthStart,
+      last_month_end: lastMonthEnd
     });
+    
+    if (!error && tasksInfo && tasksInfo.length > 0) {
+      // Success with SQL aggregation
+      const info = tasksInfo[0];
+      const todays_tasks = info.todays_tasks;
+      const yesterdays_tasks = info.yesterdays_tasks;
+      const weeks_tasks = info.weeks_tasks;
+      const last_weeks_tasks = info.last_weeks_tasks;
+      const months_tasks = info.months_tasks;
+      const last_months_tasks = info.last_months_tasks;
+      
+      // Calculate progress percentages (set to 0 if negative)
+      const progress = yesterdays_tasks > 0 
+        ? Math.max(0, ((todays_tasks - yesterdays_tasks) / yesterdays_tasks) * 100)
+        : 0;
+      
+      const weeks_progress = last_weeks_tasks > 0
+        ? Math.max(0, ((weeks_tasks - last_weeks_tasks) / last_weeks_tasks) * 100)
+        : 0;
+      
+      const months_progress = last_months_tasks > 0
+        ? Math.max(0, ((months_tasks - last_months_tasks) / last_months_tasks) * 100)
+        : 0;
+      
+      res.json({
+        todays_tasks,
+        progress,
+        weeks_tasks,
+        weeks_progress,
+        months_tasks,
+        months_progress
+      });
+    } else {
+      // Fallback to optimized individual queries with SQL aggregation where possible
+      
+      // Use SQL SUM for single-row aggregations instead of JavaScript reduce
+      const [
+        { data: todayData },
+        { data: yesterdayData },
+        { data: weekData },
+        { data: lastWeekData },
+        { data: monthData },
+        { data: lastMonthData }
+      ] = await Promise.all([
+        // Today's tasks
+        supabase
+          .from("user_task_stats")
+          .select("tasks_done.sum()")
+          .eq("user_id", userId)
+          .eq("date", today)
+          .single(),
+        
+        // Yesterday's tasks  
+        supabase
+          .from("user_task_stats")
+          .select("tasks_done.sum()")
+          .eq("user_id", userId)
+          .eq("date", yesterday)
+          .single(),
+        
+        // Current week's tasks (PostgreSQL SUM aggregation)
+        supabase
+          .from("user_task_stats")
+          .select("tasks_done.sum()")
+          .eq("user_id", userId)
+          .gte("date", weekStart)
+          .lte("date", today),
+        
+        // Last week's tasks (PostgreSQL SUM aggregation)
+        supabase
+          .from("user_task_stats")
+          .select("tasks_done.sum()")
+          .eq("user_id", userId)
+          .gte("date", lastWeekStart)
+          .lte("date", lastWeekEnd),
+        
+        // Current month's tasks (PostgreSQL SUM aggregation)
+        supabase
+          .from("user_task_stats")
+          .select("tasks_done.sum()")
+          .eq("user_id", userId)
+          .gte("date", monthStart)
+          .lte("date", today),
+        
+        // Last month's tasks (PostgreSQL SUM aggregation)
+        supabase
+          .from("user_task_stats")
+          .select("tasks_done.sum()")
+          .eq("user_id", userId)
+          .gte("date", lastMonthStart)
+          .lte("date", lastMonthEnd)
+      ]);
+      
+      // Extract aggregated values (PostgreSQL did the summing)
+      const todays_tasks = (todayData as any)?.sum || 0;
+      const yesterdays_tasks = (yesterdayData as any)?.sum || 0;
+      const weeks_tasks = (weekData as any)?.[0]?.sum || 0;
+      const last_weeks_tasks = (lastWeekData as any)?.[0]?.sum || 0;
+      const months_tasks = (monthData as any)?.[0]?.sum || 0;
+      const last_months_tasks = (lastMonthData as any)?.[0]?.sum || 0;
+      
+      // Calculate progress percentages (set to 0 if negative)
+      const progress = yesterdays_tasks > 0 
+        ? Math.max(0, ((todays_tasks - yesterdays_tasks) / yesterdays_tasks) * 100)
+        : 0;
+      
+      const weeks_progress = last_weeks_tasks > 0
+        ? Math.max(0, ((weeks_tasks - last_weeks_tasks) / last_weeks_tasks) * 100)
+        : 0;
+      
+      const months_progress = last_months_tasks > 0
+        ? Math.max(0, ((months_tasks - last_months_tasks) / last_months_tasks) * 100)
+        : 0;
+      
+      res.json({
+        todays_tasks,
+        progress,
+        weeks_tasks,
+        weeks_progress,
+        months_tasks,
+        months_progress
+      });
+    }
     
   } catch (error) {
     console.error("Error fetching tasks info:", error);
@@ -298,64 +356,91 @@ app.get("/api/v1/leaderboard", async (req: express.Request, res: express.Respons
     }
     
     if (typeParam === 'team') {
-      // Query for team leaderboard
-      const { data: teamStats } = await supabase
-        .from("user_task_stats")
-        .select(`
-          user_id,
-          tasks_done,
-          users!inner(team_id, teams!inner(team_name))
-        `)
-        .gte("date", startDate)
-        .lte("date", endDate);
-      
-      // Aggregate by team
-      const teamScores = new Map<string, number>();
-      teamStats?.forEach((stat: any) => {
-        const teamName = stat.users?.teams?.team_name;
-        if (teamName) {
-          teamScores.set(teamName, (teamScores.get(teamName) || 0) + stat.tasks_done);
-        }
+      // Try to use SQL RPC function for team leaderboard
+      const { data: teams, error } = await supabase.rpc('get_team_leaderboard', {
+        start_date: startDate,
+        end_date: endDate
       });
       
-      const teams = Array.from(teamScores.entries())
-        .map(([team_name, team_score]) => ({ team_name, team_score }))
-        .sort((a, b) => b.team_score - a.team_score);
-      
-      const result = { teams };
-      leaderboardCache.set(cacheKey, { data: result, timestamp: Date.now() });
-      res.json(result);
+      if (!error && teams) {
+        // Success with SQL aggregation
+        const result = { teams };
+        leaderboardCache.set(cacheKey, { data: result, timestamp: Date.now() });
+        res.json(result);
+      } else {
+        // Fallback to optimized Supabase query (still uses PostgreSQL joins and filtering)
+        const { data: teamStats } = await supabase
+          .from("user_task_stats")
+          .select(`
+            users!inner(teams!inner(team_name)),
+            tasks_done
+          `)
+          .gte("date", startDate)
+          .lte("date", endDate)
+          .not("users.team_id", "is", null)
+          .not("users.teams.team_name", "is", null);
+        
+        // Minimal JS aggregation after PostgreSQL filtering/joining
+        const teamScores = new Map<string, number>();
+        teamStats?.forEach((stat: any) => {
+          const teamName = stat.users?.teams?.team_name;
+          if (teamName) {
+            teamScores.set(teamName, (teamScores.get(teamName) || 0) + stat.tasks_done);
+          }
+        });
+        
+        const teams = Array.from(teamScores.entries())
+          .map(([team_name, team_score]) => ({ team_name, team_score }))
+          .sort((a, b) => b.team_score - a.team_score);
+        
+        const result = { teams };
+        leaderboardCache.set(cacheKey, { data: result, timestamp: Date.now() });
+        res.json(result);
+      }
       
     } else {
-      // Query for individual leaderboard
-      const { data: userStats } = await supabase
-        .from("user_task_stats")
-        .select(`
-          user_id,
-          tasks_done,
-          users!inner(username)
-        `)
-        .gte("date", startDate)
-        .lte("date", endDate);
-      
-      // Aggregate by user
-      const userScores = new Map<string, { username: string; score: number }>();
-      userStats?.forEach((stat: any) => {
-        const username = stat.users?.username;
-        const userId = stat.user_id;
-        if (username) {
-          const existing = userScores.get(userId) || { username, score: 0 };
-          userScores.set(userId, { username, score: existing.score + stat.tasks_done });
-        }
+      // Try to use SQL RPC function for individual leaderboard
+      const { data: individuals, error } = await supabase.rpc('get_individual_leaderboard', {
+        start_date: startDate,
+        end_date: endDate
       });
       
-      const individuals = Array.from(userScores.values())
-        .map(({ username, score }) => ({ username, user_score: score }))
-        .sort((a, b) => b.user_score - a.user_score);
-      
-      const result = { individuals };
-      leaderboardCache.set(cacheKey, { data: result, timestamp: Date.now() });
-      res.json(result);
+      if (!error && individuals) {
+        // Success with SQL aggregation
+        const result = { individuals };
+        leaderboardCache.set(cacheKey, { data: result, timestamp: Date.now() });
+        res.json(result);
+      } else {
+        // Fallback to optimized Supabase query
+        const { data: userStats } = await supabase
+          .from("user_task_stats")
+          .select(`
+            user_id,
+            users!inner(username),
+            tasks_done
+          `)
+          .gte("date", startDate)
+          .lte("date", endDate);
+        
+        // Minimal JS aggregation after PostgreSQL filtering/joining
+        const userScores = new Map<string, { username: string; score: number }>();
+        userStats?.forEach((stat: any) => {
+          const username = stat.users?.username;
+          const userId = stat.user_id;
+          if (username) {
+            const existing = userScores.get(userId) || { username, score: 0 };
+            userScores.set(userId, { username, score: existing.score + stat.tasks_done });
+          }
+        });
+        
+        const individuals = Array.from(userScores.values())
+          .map(({ username, score }) => ({ username, user_score: score }))
+          .sort((a, b) => b.user_score - a.user_score);
+        
+        const result = { individuals };
+        leaderboardCache.set(cacheKey, { data: result, timestamp: Date.now() });
+        res.json(result);
+      }
     }
     
   } catch (error) {
@@ -371,88 +456,160 @@ app.get("/api/v1/user-graph", async (req: express.Request, res: express.Response
     const dataParam = data as string || 'week';
     
     const now = new Date();
-    let user_data: Array<{ date?: string; month?: string; tasks: number }> = [];
     
     if (dataParam === 'week') {
-      // Get last 7 days of data
-      const weekData: Array<{ date: string; tasks: number }> = [];
-      for (let i = 6; i >= 0; i--) {
-        const date = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
-        const dateStr = date.toISOString().split('T')[0]!;
+      // Get last 7 days - try SQL RPC first
+      const weekAgo = new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000);
+      const startDate = weekAgo.toISOString().split('T')[0]!;
+      
+      const { data: weekData, error } = await supabase.rpc('get_user_graph_week', {
+        target_user_id: userId,
+        start_date: startDate
+      });
+      
+      if (!error && weekData) {
+        // Success with SQL aggregation
+        const user_data = weekData.map((item: any) => ({
+          date: item.date,
+          tasks: item.tasks
+        }));
+        res.json({ user_data });
+      } else {
+        // Fallback: use individual queries but let PostgreSQL do the work per query
+        const user_data: Array<{ date: string; tasks: number }> = [];
         
-        const { data: dayData } = await supabase
-          .from("user_task_stats")
-          .select("tasks_done")
-          .eq("user_id", userId)
-          .eq("date", dateStr)
-          .single();
+        // Generate 7 day queries
+        const queries = [];
+        for (let i = 6; i >= 0; i--) {
+          const date = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
+          const dateStr = date.toISOString().split('T')[0]!;
+          queries.push(
+            supabase
+              .from("user_task_stats")
+              .select("tasks_done.sum()")
+              .eq("user_id", userId)
+              .eq("date", dateStr)
+              .single()
+              .then(({ data }) => ({ 
+                date: dateStr, 
+                tasks: (data as any)?.sum || 0 
+              }))
+          );
+        }
         
-        weekData.push({ date: dateStr, tasks: dayData?.tasks_done || 0 });
+        const results = await Promise.all(queries);
+        res.json({ user_data: results });
       }
-      user_data = weekData;
       
     } else if (dataParam === '30days') {
-      // Get last 30 days, grouped every 2 days
-      const thirtyDaysData: Array<{ date: string; tasks: number }> = [];
-      for (let i = 29; i >= 0; i -= 2) {
-        const endDate = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
-        const startDate = new Date(now.getTime() - (i + 1) * 24 * 60 * 60 * 1000);
+      // Get last 30 days, grouped every 2 days - try SQL RPC first
+      const thirtyDaysAgo = new Date(now.getTime() - 29 * 24 * 60 * 60 * 1000);
+      const startDate = thirtyDaysAgo.toISOString().split('T')[0]!;
+      
+      const { data: thirtyDaysData, error } = await supabase.rpc('get_user_graph_30days', {
+        target_user_id: userId,
+        start_date: startDate
+      });
+      
+      if (!error && thirtyDaysData) {
+        // Success with SQL aggregation
+        const user_data = thirtyDaysData.map((item: any) => ({
+          date: item.date,
+          tasks: item.tasks
+        }));
+        res.json({ user_data });
+      } else {
+        // Fallback: Use PostgreSQL SUM for 2-day periods
+        const user_data: Array<{ date: string; tasks: number }> = [];
+        const queries = [];
         
-        const endDateStr = endDate.toISOString().split('T')[0]!;
-        const startDateStr = startDate.toISOString().split('T')[0]!;
+        for (let i = 29; i >= 0; i -= 2) {
+          const endDate = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
+          const startDate = new Date(now.getTime() - (i + 1) * 24 * 60 * 60 * 1000);
+          
+          const endDateStr = endDate.toISOString().split('T')[0]!;
+          const startDateStr = startDate.toISOString().split('T')[0]!;
+          
+          queries.push(
+            supabase
+              .from("user_task_stats")
+              .select("tasks_done.sum()")
+              .eq("user_id", userId)
+              .gte("date", startDateStr)
+              .lte("date", endDateStr)
+              .then(({ data }) => ({ 
+                date: endDateStr, 
+                tasks: (data as any)?.[0]?.sum || 0 
+              }))
+          );
+        }
         
-        const { data: periodData } = await supabase
-          .from("user_task_stats")
-          .select("tasks_done")
-          .eq("user_id", userId)
-          .gte("date", startDateStr)
-          .lte("date", endDateStr);
-        
-        const totalTasks = periodData?.reduce((sum, item) => sum + item.tasks_done, 0) || 0;
-        thirtyDaysData.push({ date: endDateStr, tasks: totalTasks });
+        const results = await Promise.all(queries);
+        res.json({ user_data: results });
       }
-      user_data = thirtyDaysData;
       
     } else if (dataParam === 'all_time') {
-      // Get monthly data since first task
-      const { data: firstTaskData } = await supabase
-        .from("user_task_stats")
-        .select("date")
-        .eq("user_id", userId)
-        .order("date", { ascending: true })
-        .limit(1)
-        .single();
+      // Get monthly data since first task - try SQL RPC first
+      const { data: monthlyData, error } = await supabase.rpc('get_user_graph_all_time', {
+        target_user_id: userId
+      });
       
-      if (firstTaskData) {
-        const firstDate = new Date(firstTaskData.date);
-        const monthlyData: Array<{ month: string; tasks: number }> = [];
+      if (!error && monthlyData) {
+        // Success with SQL aggregation
+        const user_data = monthlyData.map((item: any) => ({
+          month: item.month,
+          tasks: item.tasks
+        }));
+        res.json({ user_data });
+      } else {
+        // Fallback: Find first task and aggregate by month using PostgreSQL
+        const { data: firstTaskData } = await supabase
+          .from("user_task_stats")
+          .select("date")
+          .eq("user_id", userId)
+          .order("date", { ascending: true })
+          .limit(1)
+          .single();
         
-        // Iterate through months from first task to now
-        const current = new Date(firstDate.getFullYear(), firstDate.getMonth(), 1);
-        const nowMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-        
-        while (current <= nowMonth) {
-          const monthStart = current.toISOString().split('T')[0]!;
-          const monthEnd = new Date(current.getFullYear(), current.getMonth() + 1, 0).toISOString().split('T')[0]!;
-          const monthStr = current.toISOString().substring(0, 7); // YYYY-MM format
+        if (firstTaskData) {
+          const firstDate = new Date(firstTaskData.date);
+          const user_data: Array<{ month: string; tasks: number }> = [];
           
-          const { data: monthData } = await supabase
-            .from("user_task_stats")
-            .select("tasks_done")
-            .eq("user_id", userId)
-            .gte("date", monthStart)
-            .lte("date", monthEnd);
+          // Generate monthly queries using PostgreSQL date functions
+          const current = new Date(firstDate.getFullYear(), firstDate.getMonth(), 1);
+          const nowMonth = new Date(now.getFullYear(), now.getMonth(), 1);
           
-          const totalTasks = monthData?.reduce((sum, item) => sum + item.tasks_done, 0) || 0;
-          monthlyData.push({ month: monthStr, tasks: totalTasks });
+          const queries = [];
+          while (current <= nowMonth) {
+            const monthStart = current.toISOString().split('T')[0]!;
+            const monthEnd = new Date(current.getFullYear(), current.getMonth() + 1, 0).toISOString().split('T')[0]!;
+            const monthStr = current.toISOString().substring(0, 7); // YYYY-MM format
+            
+            queries.push(
+              supabase
+                .from("user_task_stats")
+                .select("tasks_done.sum()")
+                .eq("user_id", userId)
+                .gte("date", monthStart)
+                .lte("date", monthEnd)
+                .then(({ data }) => ({ 
+                  month: monthStr, 
+                  tasks: (data as any)?.[0]?.sum || 0 
+                }))
+            );
+            
+            current.setMonth(current.getMonth() + 1);
+          }
           
-          current.setMonth(current.getMonth() + 1);
+          const results = await Promise.all(queries);
+          res.json({ user_data: results });
+        } else {
+          res.json({ user_data: [] });
         }
-        user_data = monthlyData;
       }
+    } else {
+      res.status(400).json({ error: "Invalid data parameter" });
     }
-    
-    res.json({ user_data });
     
   } catch (error) {
     console.error("Error fetching user graph data:", error);
