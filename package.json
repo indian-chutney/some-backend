@@ -1,0 +1,40 @@
+{
+  "name": "some-backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "tsc -build & node dist/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/indian-chutney/some-backend.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/indian-chutney/some-backend/issues"
+  },
+  "homepage": "https://github.com/indian-chutney/some-backend#readme",
+  "dependencies": {
+    "@dotenvx/dotenvx": "^1.48.4",
+    "@supabase/supabase-js": "^2.53.0",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/jsonwebtoken": "^9.0.10",
+    "axios": "^1.11.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "jose": "^6.0.12",
+    "jsonwebtoken": "^9.0.2",
+    "querystring": "^0.2.1",
+    "typescript": "^5.9.2"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.8"
+  }
+}
