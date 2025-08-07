@@ -16,6 +16,8 @@ const supabase = createClient<Database>(
   process.env.SUPABASE_ANON_KEY as string,
 );
 
+const frontend_url = process.env.FRONTEND_URL;
+
 const app = express();
 app.use(express.json());
 app.use(cors());
@@ -34,7 +36,7 @@ app.get(
       client_secret: process.env.AZURE_CLIENT_SECRET,
       grant_type: "authorization_code",
       code,
-      redirect_uri: "http://localhost:3000/api/v1/auth/redirect",
+      redirect_uri: `${frontend_url}/api/v1/auth/redirect`,
     };
 
     try {
@@ -60,7 +62,7 @@ app.get(
       const exists = !!data;
 
       if (exists) {
-        const url = `http://localhost:5173/auth/success?id_token=${encodeURIComponent(id_token)}&exists=true`;
+        const url = `${frontend_url}/auth/success?id_token=${encodeURIComponent(id_token)}&exists=true`;
 
         return res.redirect(url);
       }
@@ -69,7 +71,7 @@ app.get(
       await supabase
         .from("users")
         .insert({ user_id: user.oid, username: user.name });
-      const url = `http://localhost:5173/auth/success?id_token=${encodeURIComponent(id_token)}&exists=false`;
+      const url = `${frontend_url}/auth/success?id_token=${encodeURIComponent(id_token)}&exists=false`;
 
       return res.redirect(url);
     } catch (error) {
