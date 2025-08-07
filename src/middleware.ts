@@ -27,8 +27,6 @@ export async function authenticate(
       audience: process.env.AZURE_CLIENT_ID as string,
     });
 
-    console.log(payload);
-
     (req as any).payload = payload;
     next();
   } catch (err) {
