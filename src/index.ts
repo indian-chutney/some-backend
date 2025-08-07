@@ -36,7 +36,7 @@ app.get(
       client_secret: process.env.AZURE_CLIENT_SECRET,
       grant_type: "authorization_code",
       code,
-      redirect_uri: `${frontend_url}/api/v1/auth/redirect`,
+      redirect_uri: `${process.env.BACKEND_BASE_URL}/api/v1/auth/redirect`,
     };
 
     try {
