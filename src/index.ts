@@ -5,8 +5,8 @@ import cors from "cors";
 import { authenticate } from "./middleware.js";
 import { type Database } from "./types/supabase.js";
 import axios from "axios";
+import jwt, { type JwtPayload } from "jsonwebtoken";
 import qs from "querystring";
-import { decodeJwt } from "jose";
 import { formatLocalDate } from "./utils/date.js";
 
 dotenvx.config();
@@ -25,11 +25,9 @@ app.use(cors());
 app.get(
   "/api/v1/auth/redirect",
   async (req: express.Request, res: express.Response) => {
-    console.log("request hit");
     const code = req.query.code;
 
     const tokenEndpoint = `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}/oauth2/v2.0/token`;
-    console.log(tokenEndpoint);
 
     const payload = {
       client_id: process.env.AZURE_CLIENT_ID,
@@ -37,6 +35,7 @@ app.get(
       grant_type: "authorization_code",
       code,
       redirect_uri: `${process.env.BACKEND_BASE_URL}/api/v1/auth/redirect`,
+      scope: "openid profile email offline_access",
     };
 
     try {
@@ -48,10 +47,18 @@ app.get(
         },
       );
 
-      console.log(response);
-
       const { id_token } = response.data;
-      const user = decodeJwt(id_token);
+      const user = jwt.decode(id_token) as JwtPayload;
+
+      const token = jwt.sign(
+        {
+          oid: user.oid,
+          name: user.name,
+          email: user.preferred_username,
+        },
+        process.env.JWT_SECRET_KEY!,
+      );
+      console.log(user);
 
       const { data } = await supabase
         .from("users")
@@ -62,16 +69,19 @@ app.get(
       const exists = !!data;
 
       if (exists) {
-        const url = `${frontend_url}/auth/success?id_token=${encodeURIComponent(id_token)}&exists=true`;
+        const url = `${frontend_url}/auth/success?id_token=${encodeURIComponent(token)}&exists=true`;
 
         return res.redirect(url);
       }
 
       // Insert user if not exists
-      await supabase
-        .from("users")
-        .insert({ user_id: user.oid, username: user.name });
-      const url = `${frontend_url}/auth/success?id_token=${encodeURIComponent(id_token)}&exists=false`;
+      await supabase.from("users").insert({
+        user_id: user.oid,
+        username: user.name,
+        email: user.preferred_username,
+      });
+
+      const url = `${frontend_url}/auth/success?id_token=${encodeURIComponent(token)}&exists=false`;
 
       return res.redirect(url);
     } catch (error) {
@@ -85,6 +95,7 @@ app.get(
     }
   },
 );
+
 app.use(authenticate);
 
 app.post(
@@ -139,6 +150,7 @@ app.post(
   "/api/v1/avatar-info",
   (req: express.Request, res: express.Response) => {
     const avatar_data = req.body.avatar_data;
+    return;
   },
 );
 
@@ -175,6 +187,7 @@ app.get(
   async (req: express.Request, res: express.Response) => {
     try {
       const userId = (req as any).payload.oid;
+
       const now = new Date();
 
       const today = formatLocalDate(now);
