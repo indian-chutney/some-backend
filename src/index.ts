@@ -119,7 +119,7 @@ app.get(
       const { data, error } = await supabaseAdmin
         .from("users")
         .select("name, email, team_id")
-        .eq("user_id", userId)
+        .eq("id", userId)
         .single();
 
       if (error) {
@@ -132,11 +132,14 @@ app.get(
         .select("name")
         .eq("id", data.team_id as string)
         .maybeSingle();
+      console.log({ username: data.name, email: data.email, team: team?.name });
 
       res.json({ username: data.name, email: data.email, team: team?.name });
+      return;
     } catch (error) {
       console.error("Error fetching user info:", error);
       res.status(500).json({ error: "Internal server error" });
+      return;
     }
   },
 );
