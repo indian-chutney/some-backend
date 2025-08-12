@@ -126,9 +126,8 @@ app.get(
         console.error("Database error:", error);
         return res.status(500).json({ error: "Database error" });
       }
-      //@ts-ignore
       //
-      const { data: team, err } = await supabaseAdmin
+      const { data: team } = await supabaseAdmin
         .from("teams")
         .select("name")
         .eq("id", data.team_id as string)
