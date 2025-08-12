@@ -24,6 +24,7 @@
   },
   "homepage": "https://github.com/indian-chutney/some-backend#readme",
   "dependencies": {
+    "tsx": "^4.16.0",
     "@dotenvx/dotenvx": "^1.48.4",
     "@supabase/supabase-js": "^2.54.0",
     "@types/cors": "^2.8.19",
