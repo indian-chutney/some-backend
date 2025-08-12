@@ -16,11 +16,10 @@ export function authenticate(req: Request, res: Response, next: NextFunction) {
       process.env.JWT_SECRET_KEY!,
     ) as JwtPayload;
     (req as any).payload = payload;
-    console.log(payload); // Attach to req for downstream use
     next();
   } catch (err) {
     return res.status(401).json({
-      message: "Invalid or expired token",
+      message: "Invalid token",
       error: (err as any).message,
     });
   }

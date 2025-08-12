@@ -4,122 +4,75 @@ import * as dotenvx from "@dotenvx/dotenvx";
 import cors from "cors";
 import { authenticate } from "./middleware.js";
 import { type Database } from "./types/supabase.js";
-import axios from "axios";
-import jwt, { type JwtPayload } from "jsonwebtoken";
-import qs from "querystring";
 import { formatLocalDate } from "./utils/date.js";
+import jwt from "jsonwebtoken";
 
 dotenvx.config();
 
-const supabase = createClient<Database>(
-  process.env.SUPABASE_URL as string,
-  process.env.SUPABASE_ANON_KEY as string,
+export const supabaseAnon = createClient<Database>(
+  process.env.SUPABASE_URL!,
+  process.env.SUPABASE_ANON_KEY!, // for auth endpoints like signInWithPassword
 );
 
-const frontend_url = process.env.FRONTEND_URL;
+export const supabaseAdmin = createClient<Database>(
+  process.env.SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!, // NEVER expose to client
+);
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 
-app.get(
-  "/api/v1/auth/redirect",
+app.post(
+  "/api/v1/login",
   async (req: express.Request, res: express.Response) => {
-    const code = req.query.code;
-
-    const tokenEndpoint = `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}/oauth2/v2.0/token`;
-
-    const payload = {
-      client_id: process.env.AZURE_CLIENT_ID,
-      client_secret: process.env.AZURE_CLIENT_SECRET,
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: `${process.env.BACKEND_BASE_URL}/api/v1/auth/redirect`,
-      scope: "openid profile email offline_access",
-    };
+    const { email, password } = req.body;
 
     try {
-      const response = await axios.post(
-        tokenEndpoint,
-        qs.stringify(payload as any),
-        {
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        },
-      );
+      const { data, error } = await supabaseAnon.auth.signInWithPassword({
+        email,
+        password,
+      });
 
-      const { id_token } = response.data;
-      const user = jwt.decode(id_token) as JwtPayload;
+      if (error) {
+        return res.status(401).json({ error: error.message });
+      }
+
+      const { user } = data!;
+      const userId = user!.id;
+
+      const { data: profile } = await supabaseAdmin
+        .from("users")
+        .select("role")
+        .eq("id", userId)
+        .maybeSingle();
+
+      const role = profile?.role ?? "user";
 
       const token = jwt.sign(
         {
-          oid: user.oid,
-          name: user.name,
-          email: user.preferred_username,
+          userId: userId,
+          role: role,
         },
         process.env.JWT_SECRET_KEY!,
       );
-      console.log(user);
 
-      const { data } = await supabase
-        .from("users")
-        .select()
-        .eq("user_id", user.oid)
-        .maybeSingle();
-
-      const exists = !!data;
-
-      if (exists) {
-        const url = `${frontend_url}/auth/success?id_token=${encodeURIComponent(token)}&exists=true`;
-
-        return res.redirect(url);
-      }
-
-      // Insert user if not exists
-      await supabase.from("users").insert({
-        user_id: user.oid,
-        username: user.name,
-        email: user.preferred_username,
+      res.json({
+        token: token,
       });
-
-      const url = `${frontend_url}/auth/success?id_token=${encodeURIComponent(token)}&exists=false`;
-
-      return res.redirect(url);
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        console.error("Token error:", error.response?.data || error.message);
-        res.status(500).send("Authentication failed");
-      } else {
-        console.error("Unexpected error:", error);
-        res.status(500).send("Unexpected error");
-      }
+    } catch (err) {
+      res.status(500).json({ error: "Server error during signin" });
     }
   },
 );
 
 app.use(authenticate);
 
-app.post(
-  "/api/v1/role",
-  async (req: express.Request, res: express.Response) => {
-    const role = (req as any).body.role;
-    try {
-      await supabase.from("users").update({ role: role });
-      res.json({
-        message: "role updated",
-      });
-    } catch (err) {
-      console.error("Database error: ", err);
-      res.status(500).send("Database error");
-    }
-    return;
-  },
-);
-
 app.get(
   "/api/v1/thanos-hp",
   async (req: express.Request, res: express.Response) => {
     try {
-      const { data, error } = await supabase.rpc("get_total_tasks_today");
+      const { data, error } = await supabaseAdmin.rpc("get_total_emails_today");
 
       if (error) {
         console.error("Database error:", error);
@@ -161,11 +114,11 @@ app.get(
   "/api/v1/user-info",
   async (req: express.Request, res: express.Response) => {
     try {
-      const userId = (req as any).payload.oid;
+      const userId = (req as any).payload.userId;
 
-      const { data, error } = await supabase
+      const { data, error } = await supabaseAdmin
         .from("users")
-        .select("username, role")
+        .select("name, email, team_id")
         .eq("user_id", userId)
         .single();
 
@@ -173,8 +126,15 @@ app.get(
         console.error("Database error:", error);
         return res.status(500).json({ error: "Database error" });
       }
+      //@ts-ignore
+      //
+      const { data: team, err } = await supabaseAdmin
+        .from("teams")
+        .select("name")
+        .eq("id", data.team_id as string)
+        .maybeSingle();
 
-      res.json({ username: data.username, role: data.role });
+      res.json({ username: data.name, email: data.email, team: team?.name });
     } catch (error) {
       console.error("Error fetching user info:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -186,7 +146,7 @@ app.get(
   "/api/v1/tasks-info",
   async (req: express.Request, res: express.Response) => {
     try {
-      const userId = (req as any).payload.oid;
+      const userId = (req as any).payload.userId;
 
       const now = new Date();
 
@@ -220,13 +180,13 @@ app.get(
         new Date(now.getFullYear(), now.getMonth(), 0),
       );
 
-      const { data: tasksInfo, error } = await supabase.rpc(
-        "get_user_tasks_info",
+      const { data: tasksInfo, error } = await supabaseAdmin.rpc(
+        "get_emails_stats",
         {
-          target_user_id: userId,
-          today_date: today,
+          target_user_id: userId, // uuid
+          today_date: today, // 'YYYY-MM-DD'
           yesterday_date: yesterday,
-          week_start: weekStart,
+          week_start: weekStart, // Monday date you computed
           last_week_start: lastWeekStart,
           last_week_end: lastWeekEnd,
           month_start: monthStart,
@@ -235,10 +195,7 @@ app.get(
         },
       );
 
-      if (error || !tasksInfo || tasksInfo.length === 0) {
-        console.error("RPC Error:", error);
-        return res.status(500).json({ error: "Failed to fetch task stats" });
-      }
+      if (error) throw error;
 
       const {
         todays_tasks,
@@ -248,7 +205,15 @@ app.get(
         months_tasks,
         last_months_tasks,
         all_time_tasks,
-      } = tasksInfo[0];
+      } = tasksInfo?.[0] ?? {
+        todays_tasks: 0,
+        yesterdays_tasks: 0,
+        weeks_tasks: 0,
+        last_weeks_tasks: 0,
+        months_tasks: 0,
+        last_months_tasks: 0,
+        all_time_tasks: 0,
+      };
 
       const progress =
         yesterdays_tasks > 0
@@ -340,166 +305,99 @@ app.get(
       let personalProgress = null;
 
       if (typeParam === "team") {
-        // Try to use SQL RPC function for team leaderboard
-        const { data: teams, error } = await supabase.rpc(
+        const { data: teams, error } = await supabaseAdmin.rpc(
           "get_team_leaderboard",
           {
             start_date: startDate,
             end_date: endDate,
+            lim: 100,
+            off: 0,
           },
         );
+        if (error) throw error;
 
+        let personalProgress = null;
         if (userId) {
-          const { data: userData, error: userError } = await supabase
-            .from("users")
-            .select("team_id, teams:team_id(team_name)")
-            .eq("user_id", userId)
-            .maybeSingle();
-          // @ts-ignore
-          const userTeamName = userData?.teams.team_name;
-
-          if (userTeamName) {
-            const rank = teams.findIndex(
-              (t: { team_name: string; team_score: string }) =>
-                t.team_name === userTeamName,
-            );
-            const teamEntry = teams[rank];
-
-            if (rank !== -1 && teamEntry) {
-              personalProgress = {
-                rank: rank + 1,
-                name: userTeamName,
-                score: teamEntry.team_score,
-                totalParticipants: teams.length,
-              };
-            }
+          const { data: pos } = await supabaseAdmin.rpc(
+            "get_team_position_for_user",
+            {
+              target_user_id: userId,
+              start_date: startDate,
+              end_date: endDate,
+            },
+          );
+          const p = pos?.[0];
+          if (p) {
+            personalProgress = {
+              rank: p.rank,
+              name: p.team_name,
+              score: p.team_score,
+              totalParticipants: p.total_teams,
+            };
           }
         }
 
-        if (!error && teams) {
-          // Success with SQL aggregation
-          const result = { teams };
-          leaderboardCache.set(cacheKey, {
-            data: { ...result, personal_progress: personalProgress },
-            timestamp: Date.now(),
-          });
+        const result = {
+          teams: (teams ?? []).map((t) => ({
+            team_name: t.team_name ?? "Unknown Team",
+            team_score: t.team_score,
+            rank: t.rnk,
+          })),
+        };
 
-          res.json({ ...result, personal_progress: personalProgress });
-        } else {
-          // Fallback to optimized Supabase query (still uses PostgreSQL joins and filtering)
-          const { data: teamStats } = await supabase
-            .from("user_task_stats")
-            .select(
-              `
-            users!inner(teams!inner(team_name)),
-            tasks_done
-          `,
-            )
-            .gte("date", startDate)
-            .lte("date", endDate)
-            .not("users.team_id", "is", null)
-            .not("users.teams.team_name", "is", null);
+        leaderboardCache.set(cacheKey, {
+          data: { ...result, personal_progress: personalProgress },
+          timestamp: Date.now(),
+        });
 
-          // Minimal JS aggregation after PostgreSQL filtering/joining
-          const teamScores = new Map<string, number>();
-          teamStats?.forEach((stat: any) => {
-            const teamName = stat.users?.teams?.team_name;
-            if (teamName) {
-              teamScores.set(
-                teamName,
-                (teamScores.get(teamName) || 0) + stat.tasks_done,
-              );
-            }
-          });
-
-          const teams = Array.from(teamScores.entries())
-            .map(([team_name, team_score]) => ({ team_name, team_score }))
-            .sort((a, b) => b.team_score - a.team_score);
-
-          const result = { teams };
-          leaderboardCache.set(cacheKey, {
-            data: { ...result, personal_progress: personalProgress },
-            timestamp: Date.now(),
-          });
-          res.json({ ...result, personal_progress: personalProgress });
-        }
+        return res.json({ ...result, personal_progress: personalProgress });
       } else {
-        // Try to use SQL RPC function for individual leaderboard
-        const { data: individuals, error } = await supabase.rpc(
+        // Individual leaderboard
+
+        const { data: individuals, error } = await supabaseAdmin.rpc(
           "get_individual_leaderboard",
-          {
-            start_date: startDate,
-            end_date: endDate,
-          },
+          { start_date: startDate, end_date: endDate, lim: 100, off: 0 },
         );
 
-        const username = (req as any).payload.name;
-        const rank = individuals.findIndex(
-          (i: { username: string; user_score: string }) =>
-            i.username === username,
-        );
-        const userEntry = individuals[rank];
+        let personalProgress = null;
+        if (userId) {
+          const { data: me } = await supabaseAdmin.rpc(
+            "get_individual_position",
+            {
+              target_user_id: userId,
+              start_date: startDate,
+              end_date: endDate,
+            },
+          );
 
-        if (rank !== -1 && userEntry) {
-          personalProgress = {
-            rank: rank + 1,
-            name: username,
-            score: userEntry.user_score,
-            totalParticipants: individuals.length,
-          };
+          const pos = me?.[0];
+          if (pos) {
+            const username = (req as any).payload.name;
+            personalProgress = {
+              rank: pos.rank,
+              name: username,
+              score: pos.user_score,
+              totalParticipants: pos.total_participants,
+            };
+          }
         }
 
-        if (!error && individuals) {
-          // Success with SQL aggregation
-          const result = { individuals };
-          leaderboardCache.set(cacheKey, {
-            data: { ...result, personal_progress: personalProgress },
-            timestamp: Date.now(),
-          });
+        if (error) throw error;
 
-          res.json({ ...result, personal_progress: personalProgress });
-        } else {
-          // Fallback to optimized Supabase query
-          const { data: userStats } = await supabase
-            .from("user_task_stats")
-            .select(
-              `
-            user_id,
-            users!inner(username),
-            tasks_done
-          `,
-            )
-            .gte("date", startDate)
-            .lte("date", endDate);
+        const result = {
+          individuals: (individuals ?? []).map((i) => ({
+            username: i.username ?? "Unknown",
+            user_score: i.user_score,
+            rank: i.rnk,
+          })),
+        };
 
-          // Minimal JS aggregation after PostgreSQL filtering/joining
-          const userScores = new Map<
-            string,
-            { username: string; score: number }
-          >();
-          userStats?.forEach((stat: any) => {
-            const username = stat.users?.username;
-            const userId = stat.user_id;
-            if (username) {
-              const existing = userScores.get(userId) || { username, score: 0 };
-              userScores.set(userId, {
-                username,
-                score: existing.score + stat.tasks_done,
-              });
-            }
-          });
+        leaderboardCache.set(cacheKey, {
+          data: { ...result, personal_progress: personalProgress },
+          timestamp: Date.now(),
+        });
 
-          const individuals = Array.from(userScores.values())
-            .map(({ username, score }) => ({ username, user_score: score }))
-            .sort((a, b) => b.user_score - a.user_score);
-
-          const result = { individuals };
-          leaderboardCache.set(cacheKey, {
-            data: { ...result, personal_progress: personalProgress },
-            timestamp: Date.now(),
-          });
-          res.json({ ...result, personal_progress: personalProgress });
-        }
+        res.json({ ...result, personal_progress: personalProgress });
       }
     } catch (error) {
       console.error("Error fetching leaderboard:", error);
@@ -512,189 +410,80 @@ app.get(
   "/api/v1/user-graph",
   async (req: express.Request, res: express.Response) => {
     try {
-      const userId = (req as any).payload.oid;
+      const userId = (req as any).payload.userId; // keep your current source
       const { data } = req.query;
       const dataParam = (data as string) || "week";
 
       const now = new Date();
 
       if (dataParam === "week") {
-        // Get last 7 days - try SQL RPC first
         const weekAgo = new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000);
-        const startDate = weekAgo.toISOString().split("T")[0]!;
+        const startDate = formatLocalDate(weekAgo);
 
-        const { data: weekData, error } = await supabase.rpc(
+        const { data: weekData, error } = await supabaseAdmin.rpc(
           "get_user_graph_week",
-          {
-            target_user_id: userId,
-            start_date: startDate,
-          },
+          { target_user_id: userId, start_date: startDate },
         );
 
-        if (!error && weekData) {
-          // Success with SQL aggregation
-          const user_data = weekData.map((item: any) => ({
-            date: item.date,
-            tasks: item.tasks,
-          }));
-          res.json({ user_data });
-        } else {
-          // Fallback: use individual queries but let PostgreSQL do the work per query
-          const user_data: Array<{ date: string; tasks: number }> = [];
+        if (error) throw error;
 
-          // Generate 7 day queries
-          const queries = [];
-          for (let i = 6; i >= 0; i--) {
-            const date = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
-            const dateStr = date.toISOString().split("T")[0]!;
-            queries.push(
-              supabase
-                .from("user_task_stats")
-                .select("tasks_done.sum()")
-                .eq("user_id", userId)
-                .eq("date", dateStr)
-                .single()
-                .then(({ data }) => ({
-                  date: dateStr,
-                  tasks: (data as any)?.sum || 0,
-                })),
-            );
-          }
+        const user_data = (weekData ?? []).map((item: any) => ({
+          date: item.date, // 'YYYY-MM-DD'
+          tasks: item.tasks, // number
+        }));
 
-          const results = await Promise.all(queries);
-          res.json({ user_data: results });
-        }
-      } else if (dataParam === "30days") {
-        // Get last 30 days, grouped every 2 days - try SQL RPC first
+        return res.json({ user_data });
+      }
+
+      if (dataParam === "30days") {
         const thirtyDaysAgo = new Date(
           now.getTime() - 29 * 24 * 60 * 60 * 1000,
         );
-        const startDate = thirtyDaysAgo.toISOString().split("T")[0]!;
+        const startDate = formatLocalDate(thirtyDaysAgo);
 
-        const { data: thirtyDaysData, error } = await supabase.rpc(
+        const { data: thirtyDaysData, error } = await supabaseAdmin.rpc(
           "get_user_graph_30days",
-          {
-            target_user_id: userId,
-            start_date: startDate,
-          },
+          { target_user_id: userId, start_date: startDate },
         );
 
-        if (!error && thirtyDaysData) {
-          // Success with SQL aggregation
-          const user_data = thirtyDaysData.map((item: any) => ({
-            date: item.date,
-            tasks: item.tasks,
-          }));
-          res.json({ user_data });
-        } else {
-          // Fallback: Use PostgreSQL SUM for 2-day periods
-          const user_data: Array<{ date: string; tasks: number }> = [];
-          const queries = [];
+        if (error) throw error;
 
-          for (let i = 29; i >= 0; i -= 2) {
-            const endDate = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
-            const startDate = new Date(
-              now.getTime() - (i + 1) * 24 * 60 * 60 * 1000,
-            );
+        const user_data = (thirtyDaysData ?? []).map((item: any) => ({
+          date: item.date, // bucket end date 'YYYY-MM-DD'
+          tasks: item.tasks, // number
+        }));
 
-            const endDateStr = endDate.toISOString().split("T")[0]!;
-            const startDateStr = startDate.toISOString().split("T")[0]!;
-
-            queries.push(
-              supabase
-                .from("user_task_stats")
-                .select("tasks_done.sum()")
-                .eq("user_id", userId)
-                .gte("date", startDateStr)
-                .lte("date", endDateStr)
-                .then(({ data }) => ({
-                  date: endDateStr,
-                  tasks: (data as any)?.[0]?.sum || 0,
-                })),
-            );
-          }
-
-          const results = await Promise.all(queries);
-          res.json({ user_data: results });
-        }
-      } else if (dataParam === "all_time") {
-        // Get monthly data since first task - try SQL RPC first
-        const { data: monthlyData, error } = await supabase.rpc(
-          "get_user_graph_all_time",
-          {
-            target_user_id: userId,
-          },
-        );
-
-        if (!error && monthlyData) {
-          // Success with SQL aggregation
-          const user_data = monthlyData.map((item: any) => ({
-            month: item.month,
-            tasks: item.tasks,
-          }));
-          res.json({ user_data });
-        } else {
-          // Fallback: Find first task and aggregate by month using PostgreSQL
-          const { data: firstTaskData } = await supabase
-            .from("user_task_stats")
-            .select("date")
-            .eq("user_id", userId)
-            .order("date", { ascending: true })
-            .limit(1)
-            .single();
-
-          if (firstTaskData) {
-            const firstDate = new Date(firstTaskData.date);
-            const user_data: Array<{ month: string; tasks: number }> = [];
-
-            // Generate monthly queries using PostgreSQL date functions
-            const current = new Date(
-              firstDate.getFullYear(),
-              firstDate.getMonth(),
-              1,
-            );
-            const nowMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-
-            const queries = [];
-            while (current <= nowMonth) {
-              const monthStart = current.toISOString().split("T")[0]!;
-              const monthEnd = new Date(
-                current.getFullYear(),
-                current.getMonth() + 1,
-                0,
-              )
-                .toISOString()
-                .split("T")[0]!;
-              const monthStr = current.toISOString().substring(0, 7); // YYYY-MM format
-
-              queries.push(
-                supabase
-                  .from("user_task_stats")
-                  .select("tasks_done.sum()")
-                  .eq("user_id", userId)
-                  .gte("date", monthStart)
-                  .lte("date", monthEnd)
-                  .then(({ data }) => ({
-                    month: monthStr,
-                    tasks: (data as any)?.[0]?.sum || 0,
-                  })),
-              );
-
-              current.setMonth(current.getMonth() + 1);
-            }
-
-            const results = await Promise.all(queries);
-            res.json({ user_data: results });
-          } else {
-            res.json({ user_data: [] });
-          }
-        }
-      } else {
-        res.status(400).json({ error: "Invalid data parameter" });
+        return res.json({ user_data });
       }
+
+      if (dataParam === "all_time") {
+        const { data: monthlyData, error } = await supabaseAdmin.rpc(
+          "get_user_graph_all_time",
+          { target_user_id: userId },
+        );
+
+        if (error) throw error;
+
+        const user_data = (monthlyData ?? []).map((item: any) => ({
+          month: item.month, // 'YYYY-MM'
+          tasks: item.tasks, // number
+        }));
+
+        return res.json({ user_data });
+      }
+
+      return res.status(400).json({ error: "Invalid data parameter" });
     } catch (error) {
       console.error("Error fetching user graph data:", error);
-      res.status(500).json({ error: "Internal server error" });
+      // keep response shape stable
+      if (req.query.data === "all_time") {
+        return res.json({
+          user_data: [] as Array<{ month: string; tasks: number }>,
+        });
+      }
+      return res.json({
+        user_data: [] as Array<{ date: string; tasks: number }>,
+      });
     }
   },
 );
